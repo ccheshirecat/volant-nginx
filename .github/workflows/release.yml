@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag"
+        required: true
+        default: "v0.1.0"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+
+      - name: Get release version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download fsify
+        run: |
+          sudo apt-get update && sudo apt-get install -y skopeo umoci coreutils util-linux e2fsprogs
+          curl -L -o fsify https://github.com/ccheshirecat/fsify/releases/download/v0.0.3/fsify-linux-amd64-fsify
+          chmod +x fsify
+
+      - name: Create nginx.img with fsify
+        run: |
+          sudo ./fsify -s 64 -o nginx.img nginx:latest
+
+      - name: Calculate checksum
+        id: checksum
+        run: |
+          IMG_CHECKSUM=$(sha256sum nginx.img | cut -d' ' -f1)
+          echo "img_checksum=$IMG_CHECKSUM" >> $GITHUB_OUTPUT
+
+      - name: Update manifest
+        run: |
+          jq --arg version "${{ steps.version.outputs.version }}" \
+             --arg checksum "${{ steps.checksum.outputs.img_checksum }}" \
+             --arg url "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/nginx.img" \
+             '.version = $version | .rootfs.checksum = $checksum | .rootfs.url = $url' \
+             manifest/nginx.json > manifest/nginx.json.tmp
+          mv manifest/nginx.json.tmp manifest/nginx.json
+
+      - name: Upload nginx.img to GHCR
+        run: |
+          # Install oras for uploading raw artifacts
+          curl -LO https://github.com/oras-project/oras/releases/download/v1.1.0/oras_1.1.0_linux_amd64.tar.gz
+          tar -xzf oras_1.1.0_linux_amd64.tar.gz
+          sudo mv oras /usr/local/bin/
+
+          # Upload the raw nginx.img file
+          oras push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/nginx-img:${{ steps.version.outputs.tag }} nginx.img:application/octet-stream
+          oras push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/nginx-img:latest nginx.img:application/octet-stream
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          release_name: Release ${{ steps.version.outputs.tag }}
+          body: |
+            ## Volant Nginx Plugin Release ${{ steps.version.outputs.tag }}
+
+            Bootable ext4 filesystem image created from `nginx:latest` using fsify.
+
+            ### Artifacts
+            - **nginx.img**: Raw ext4 filesystem (64MB) ready for microVM boot
+            - **nginx.json**: Updated plugin manifest
+
+            ### Details
+            - Filesystem checksum: `${{ steps.checksum.outputs.img_checksum }}`
+            - Size: 64MB
+
+            ### GHCR Artifact
+            ```
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/nginx-img:${{ steps.version.outputs.tag }}
+            ```
+          draft: false
+          prerelease: false
+
+      - name: Upload nginx.img to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./nginx.img
+          asset_name: nginx.img
+          asset_content_type: application/octet-stream
+
+      - name: Upload updated manifest to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./manifest/nginx.json
+          asset_name: nginx.json
+          asset_content_type: application/json
+
+      - name: Commit updated manifest
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Action"
+          git add manifest/nginx.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update manifest for release ${{ steps.version.outputs.tag }}"
+            git push origin HEAD:main || git push origin HEAD:master || echo "Could not push to main/master branch"
+          fi
