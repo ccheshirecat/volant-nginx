@@ -8,8 +8,8 @@
   "image": "nginx:latest",
   "image_digest": "sha256:887a5a497ad28b83b9868d346db1502fab82b8df7f4e0fccc15c200800429b20",
   "rootfs": {
-    "url": "",
-    "checksum": "be639b23d45275adc260e974085a46ef8bc121c788b436bd7dd1f1ecf22b129c"
+    "url": "https://github.com/ccheshirecat/volant-nginx/releases/download/v0.1.0/nginx.img",
+    "checksum": "698b786d23033a8eeae3e4df62966c4fe8b63a125609cf64bf98e85c200ce81f"
   },
   "resources": {
     "cpu_cores": 1,
@@ -17,7 +17,12 @@
   },
   "workload": {
     "type": "http",
-    "entrypoint": ["/docker-entrypoint.sh", "nginx", "-g", "daemon off;"],
+    "entrypoint": [
+      "/docker-entrypoint.sh",
+      "nginx",
+      "-g",
+      "daemon off;"
+    ],
     "base_url": "http://127.0.0.1:80",
     "env": {
       "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
